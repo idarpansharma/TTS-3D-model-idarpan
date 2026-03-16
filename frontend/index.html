@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Avatar</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #1a1a1a;
+            overflow: hidden;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        /* UI CONTAINER */
+        #ui-container {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 700px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 20px;
+            border-radius: 15px;
+            display: flex;
+            gap: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            transition: all 0.3s ease;
+        }
+
+        #ui-container:focus-within {
+            box-shadow: 0 10px 40px rgba(76, 175, 80, 0.3);
+            border-color: rgba(76, 175, 80, 0.5);
+        }
+
+        /* AVATAR SELECTOR */
+        select {
+            padding: 12px;
+            border-radius: 8px;
+            border: none;
+            background: #333;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            outline: none;
+            border-right: 1px solid #555;
+        }
+
+        input {
+            flex-grow: 1;
+            padding: 12px 15px;
+            border-radius: 8px;
+            border: none;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 16px;
+            outline: none;
+            transition: background 0.2s;
+        }
+
+        input:focus {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        button {
+            padding: 12px 25px;
+            border-radius: 8px;
+            border: none;
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.1s, background 0.2s;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        button:active {
+            transform: scale(0.95);
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: wait;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="loader"></div>
+
+    <div id="ui-container">
+        <select id="avatarSelector">
+            <option value="./darpan.glb">Darpan</option>
+            <option value="./CEO.glb">CEO</option>
+        </select>
+
+        <input type="text" id="textInput" placeholder="Type text to speak..." autocomplete="off">
+        <button id="speakBtn" type="button">SPEAK</button>
+    </div>
+
+    <!-- DEBUG OVERLAY -->
+    <div id="debug-overlay"
+        style="position: absolute; top: 10px; left: 10px; color: lime; font-family: monospace; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; pointer-events: none; display: none;">
+        <div>Phoneme: <span id="debug-phoneme">-</span></div>
+        <div id="debug-morphs"></div>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+
+        // 🌍 HDRI Environment
+        new RGBELoader()
+            .setPath('./')
+            .load('brown_photostudio_01_4k.hdr', function (texture) {
+                console.log("✅ HDRI Loaded Successfully");
+                texture.mapping = THREE.EquirectangularReflectionMapping;
+                scene.background = texture;
+                scene.environment = texture;
+                scene.backgroundBlurriness = 0; // Ensure no blur as requested
+            }, undefined, function (error) {
+                console.error("❌ An error occurred loading the HDRI:", error);
+            });
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.5, 1.55);
+        const renderer = new THREE.WebGLRenderer({
+            antialias: true,
+            powerPreference: "high-performance"
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 🔥 CRISP
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+        // Slightly lower exposure to stop white wash
+        renderer.toneMappingExposure = 0.7;
+
+        // Softer highlights, cinematic roll-off
+        renderer.physicallyCorrectLights = true;
+
+        document.body.appendChild(renderer.domElement);
+        // 🌤 Warm Key Light (main face light)
+        const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.1);
+        keyLight.position.set(1.2, 2.0, 2.2);
+        scene.add(keyLight);
+
+        // 🌥 Soft Warm Fill (controls shadows)
+        const fillLight = new THREE.DirectionalLight(0xffe6c7, 0.9);
+        fillLight.position.set(-1.4, 1.6, 1.4);
+        scene.add(fillLight);
+
+        // ✨ Subtle Rim Light (no over-sharp edges)
+        const rimLight = new THREE.DirectionalLight(0xfff5e6, 0.7);
+        rimLight.position.set(0, 2.3, -2.2);
+        scene.add(rimLight);
+        // 🌑 Warm Ambient (very gentle)
+        scene.add(new THREE.AmbientLight(0xffedd5, 0.18));
+        // --- VARIABLES ---
+        let currentAvatar = null;
+        let headMesh = null;
+        let jawBone = null;
+        let neckBone = null;
+        let leftArm = null, rightArm = null;
+        let leftForeArm = null, rightForeArm = null;
+        let leftEyeBone = null, rightEyeBone = null;
+        let leftLeg = null, rightLeg = null;
+        let leftLowerLeg = null, rightLowerLeg = null;
+        let morphMap = {};
+        let isEntering = false;
+
+        // Animation System
+        let mixer = null;
+        let clock = new THREE.Clock();
+        const animationClips = {};
+        let currentAction = null;
+        let walkAction = null;
+        let idleAction = null;
+
+        // Eye Animation
+        let eyeTarget = { x: 0, y: 0 };
+        let nextEyeMoveTime = 0;
+
+        // Audio
+        let audioContext, analyser, dataArray;
+        let isSpeaking = false;
+        let currentLipSync = null; // Store Rhubarb data
+        const audioPlayer = new Audio();
+        audioPlayer.crossOrigin = "anonymous";
+
+        // Loader
+        const gltfLoader = new GLTFLoader();
+        const loaderUi = document.getElementById('loader');
+
+        // --- FUNCTION: LOAD AVATAR ---
+        function loadAvatar(url) {
+            loaderUi.classList.add('active');
+
+            // 1. Remove Old Avatar
+            if (currentAvatar) {
+                scene.remove(currentAvatar);
+                currentAvatar.traverse((child) => {
+                    if (child.isMesh) {
+                        child.geometry.dispose();
+                        child.material.dispose();
+                    }
+                });
+                currentAvatar = null;
+                headMesh = null;
+                jawBone = null;
+                neckBone = null;
+                leftEyeBone = null; rightEyeBone = null;
+                leftArm = null; rightArm = null;
+                leftLeg = null; rightLeg = null;
+                leftLowerLeg = null; rightLowerLeg = null;
+                morphMap = {}; // Now stores { 'A': [{index, weight}, ...], ... }
+            }
+
+            // 2. Load New Avatar
+            gltfLoader.load(url, (gltf) => {
+                loaderUi.classList.remove('active');
+
+                if (currentAvatar) {
+                    scene.remove(currentAvatar);
+                    headMesh = null;
+                }
+
+                currentAvatar = gltf.scene;
+
+                // 1. Center and Scale
+                const box = new THREE.Box3().setFromObject(currentAvatar);
+                const center = box.getCenter(new THREE.Vector3());
+                currentAvatar.position.sub(center);
+                currentAvatar.position.y = -1;
+                currentAvatar.scale.set(1.5, 1.5, 1.5);
+
+                // Start Off-Screen (Right)
+                currentAvatar.position.x = 2.5;
+                currentAvatar.rotation.y = -Math.PI / 2;
+                isEntering = true;
+
+                scene.add(currentAvatar);
+
+                // 🎨 Improve skin realism
+                currentAvatar.traverse((obj) => {
+                    if (obj.isMesh && obj.material) {
+                        obj.material.roughness = 1.2;
+                        obj.material.metalness = 0.0;
+                        obj.material.envMapIntensity = 0.55;
+                        obj.material.needsUpdate = true;
+                    }
+                });
+
+                // 3. SETUP ANIMATION MIXER
+                mixer = new THREE.AnimationMixer(currentAvatar);
+                if (animationClips.idle && animationClips.walk) {
+                    idleAction = mixer.clipAction(animationClips.idle);
+                    walkAction = mixer.clipAction(animationClips.walk);
+                    idleAction.setEffectiveWeight(0);
+                    walkAction.setEffectiveWeight(0);
+
+                    if (isEntering) {
+                        walkAction.setEffectiveWeight(1);
+                        walkAction.timeScale = 0.8;
+                        walkAction.play();
+                        currentAction = walkAction;
+                    } else {
+                        idleAction.setEffectiveWeight(1);
+                        idleAction.play();
+                        currentAction = idleAction;
+                    }
+                }
+
+                // Combined Bone Traversal
+                currentAvatar.traverse((bone) => {
+                    if (!bone.isBone) return;
+                    const name = bone.name.toLowerCase();
+                    // Bones (Eyes, Neck, Arms) are still needed for body movement
+                    if (!neckBone && (name.includes('neck') || name.includes('head'))) neckBone = bone;
+                    const isLeft = name.includes('left') || name.includes('l_') || name.endsWith('_l');
+                    const isRight = name.includes('right') || name.includes('r_') || name.endsWith('_r');
+                    if (name.includes('eye') && !name.includes('brow') && !name.includes('lid')) {
+                        if (isLeft) leftEyeBone = bone;
+                        if (isRight) rightEyeBone = bone;
+                    }
+                    if ((name.includes('upper') || name.includes('arm')) && !name.includes('fore')) {
+                        if (isLeft) leftArm = bone;
+                        if (isRight) rightArm = bone;
+                    }
+                    if (name.includes('fore') || name.includes('lower')) {
+                        if (isLeft) leftForeArm = bone;
+                        if (isRight) rightForeArm = bone;
+                    }
+                });
+
+                console.log("--------------------");
+                console.log("🔍 Scanning VRM for Composite Visemes...");
+
+                // --- COMPOSITE MAPPING RECIPES ---
+                const PHONEME_RECIPES = {
+                    'A': [ // MBP (Closed, pressed)
+                        { name: 'viseme_PP', weight: 1.0 },
+                        { name: 'mouthPress', weight: 0.4 },
+                        { name: 'mouthRollLower', weight: 0.2 }
+                    ],
+                    'B': [ // KST (Slight open, teeth)
+                        { name: 'viseme_kk', weight: 1.0 },
+                        { name: 'jawOpen', weight: 0.1 },
+                        { name: 'mouthDimpleLeft', weight: 0.1 },
+                        { name: 'mouthDimpleRight', weight: 0.1 }
+                    ],
+                    'C': [ // E (Wide, smile)
+                        { name: 'viseme_E', weight: 1.0 },
+                        { name: 'mouthSmile', weight: 0.3 },
+                        { name: 'mouthStretchLeft', weight: 0.2 },
+                        { name: 'mouthStretchRight', weight: 0.2 }
+                    ],
+                    'D': [ // Ah (Wide Open)
+                        { name: 'viseme_aa', weight: 1.0 },
+                        { name: 'jawOpen', weight: 0.3 },
+                        { name: 'mouthSmile', weight: 0.1 }
+                    ],
+
+                    'G': [ // FV (Teeth on Lip)
+                        { name: 'viseme_FF', weight: 1.0 },
+                        { name: 'mouthShrugLower', weight: 0.3 },
+                        { name: 'mouthLowerDownLeft', weight: 0.1 },
+                        { name: 'mouthLowerDownRight', weight: 0.1 }
+                    ],
+                    'H': [ // L (Tongue)
+                        { name: 'viseme_nn', weight: 1.0 },
+                        { name: 'mouthSmile', weight: 0.2 },
+                        { name: 'jawOpen', weight: 0.15 }
+                    ],
+                    'X': [ // Rest
+                        { name: 'viseme_sil', weight: 1.0 },
+                        { name: 'mouthClose', weight: 0.2 }
+                    ],
+                    // TRUE O (round, relaxed)
+                    'O': [
+                        { name: 'viseme_O', weight: 1.0 },
+                        { name: 'mouthFunnel', weight: 0.15 } // very subtle
+                    ],
+                    // U / OO (tight)
+                    'U': [
+                        { name: 'viseme_U', weight: 1.0 },
+                        { name: 'mouthPucker', weight: 0.6 }
+                    ]
+
+                };
+
+                // Find the best mesh (usually Head_Mesh)
+                let bestMesh = null;
+                let maxRefMatches = 0;
+
+                // Helper to check if a mesh has enough targets
+                currentAvatar.traverse((child) => {
+                    if (child.isMesh && child.morphTargetDictionary) {
+                        const dict = child.morphTargetDictionary;
+                        const keys = Object.keys(dict);
+                        let matches = 0;
+                        if (keys.includes('viseme_PP')) matches++;
+                        if (keys.includes('viseme_aa')) matches++;
+                        if (keys.includes('mouthSmile')) matches++;
+
+                        if (matches > maxRefMatches) {
+                            maxRefMatches = matches;
+                            bestMesh = child;
+                        }
+                    }
+                });
+
+                if (bestMesh) {
+                    headMesh = bestMesh;
+                    console.log(`✅ Identified Head Mesh: ${headMesh.name}`);
+
+                    // Resolve Recipes to Indices
+                    // Structure: morphMap['A'] = [ { index: 12, weight: 1.0 }, ... ]
+                    const dict = headMesh.morphTargetDictionary;
+                    morphMap = {};
+
+                    for (const [key, recipe] of Object.entries(PHONEME_RECIPES)) {
+                        const resolvedList = [];
+                        recipe.forEach(item => {
+                            // Try exact match first
+                            let idx = dict[item.name];
+                            // If not found, try common variations (e.g., viseme_PP -> viseme_pp)
+                            if (idx === undefined) idx = dict[item.name.toLowerCase()];
+
+                            if (idx !== undefined) {
+                                resolvedList.push({
+                                    index: idx,
+                                    weight: item.weight,
+                                    name: item.name // Required for context awareness
+                                });
+                            } else {
+                                // console.warn(`Missing Morph: ${item.name} for phoneme ${key}`);
+                            }
+                        });
+                        morphMap[key] = resolvedList;
+                    }
+                    console.log("   Mapped Composite Visemes:", morphMap);
+
+                } else {
+                    console.error("❌ CRITICAL: Head Mesh not found.");
+                }
+
+            }, undefined, (error) => {
+                console.error('An error occurred loading the avatar:', error);
+                loaderUi.classList.remove('active');
+            });
+        }
+
+        // --- HELPER: MAKE ANIMATION IN-PLACE ---
+        function makeClipInPlace(clip) {
+            clip.tracks.forEach((track) => {
+                if (track.name.endsWith('.position') && (track.name.includes('Hips') || track.name.includes('Root') || track.name.includes('mixamorig'))) {
+                    const values = track.values;
+                    const initialX = values[0];
+                    const initialZ = values[2];
+                    for (let i = 0; i < track.times.length; i++) {
+                        values[i * 3] = initialX;     // Lock X
+                        values[i * 3 + 2] = initialZ; // Lock Z
+                    }
+                    console.log(`🔧 Fixed Root Motion for track: ${track.name}`);
+                }
+            });
+            return clip;
+        }
+
+        // --- FUNCTION: LOAD ANIMATIONS ---
+        function loadAnimations() {
+            const loader = new GLTFLoader();
+
+            // Load Idle
+            loader.load('./idle/M_Standing_Idle_001.glb', (gltf) => {
+                if (gltf.animations.length > 0) {
+                    animationClips.idle = gltf.animations[0];
+                    console.log("✅ Idle Animation Loaded");
+                }
+            });
+
+            // Load Walk
+            loader.load('./locomotion/M_Walk_001.glb', (gltf) => {
+                if (gltf.animations.length > 0) {
+                    const clip = gltf.animations[0];
+                    animationClips.walk = makeClipInPlace(clip); // Fix Root Motion
+                    console.log("✅ Walk Animation Loaded & Fixed");
+                }
+            });
+        }
+
+        loadAnimations();
+
+        // --- INITIAL LOAD ---
+        loadAvatar('./darpan.glb');
+
+        // --- EVENT LISTENERS ---
+        const selector = document.getElementById('avatarSelector');
+
+        // Handle Avatar Switch
+        selector.addEventListener('change', (e) => {
+            loadAvatar(e.target.value);
+        });
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 1.3, 0);
+        controls.enablePan = false; // 🔥 Disable Panning (Fixes "Sliding")
+        controls.minDistance = 0.8; // Don't get too close
+        controls.maxDistance = 1.7; // Allow more zoom out for portrait lens
+        controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't go below floor
+        controls.update();
+
+        // --- AUDIO SYSTEM ---
+        function setupAudioSystem() {
+            if (audioContext) return;
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.1; // 🔥 Reduced latency
+            const source = audioContext.createMediaElementSource(audioPlayer);
+            source.connect(analyser);
+            analyser.connect(audioContext.destination);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+        }
+
+        // --- UI LOGIC ---
+        const btn = document.getElementById('speakBtn');
+        const input = document.getElementById('textInput');
+
+        input.addEventListener("keypress", (e) => { if (e.key === "Enter") btn.click(); });
+
+        btn.addEventListener('click', async () => {
+            const text = input.value.trim();
+            if (!text) return;
+
+            setupAudioSystem();
+            if (audioContext.state === 'suspended') audioContext.resume();
+
+            btn.disabled = true;
+            btn.innerText = "Generating...";
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/speak', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                });
+
+                const data = await response.json();
+
+                if (data.audio_url) {
+                    audioPlayer.src = data.audio_url;
+
+                    // Store Lip Sync Data
+                    if (data.lip_sync) {
+                        currentLipSync = data.lip_sync;
+                        console.log("👄 Lip Sync Data Loaded:", currentLipSync);
+                    }
+
+                    audioPlayer.play();
+
+                    isSpeaking = true;
+                    btn.innerText = "Speaking...";
+
+                    audioPlayer.onended = () => {
+                        isSpeaking = false;
+                        btn.disabled = false;
+                        btn.innerText = "SPEAK";
+                        currentLipSync = null; // Clear data
+
+                        // Reset mouth
+                        if (jawBone) jawBone.rotation.x = 0;
+                        if (headMesh) {
+                            Object.values(morphMap).forEach(idx => {
+                                headMesh.morphTargetInfluences[idx] = 0;
+                            });
+                        }
+                    };
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Check backend connection");
+                btn.disabled = false;
+                btn.innerText = "SPEAK";
+            }
+        });
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+
+            // 1. Walking / Idle Logic
+            // 1. Animation Mixer Update
+            const delta = clock.getDelta();
+            if (mixer) mixer.update(delta);
+
+            if (leftArm && rightArm) {
+                // Left Arm
+                leftArm.rotation.x = 1.35; // Down
+                leftArm.rotation.z = 0.01; // Tuck
+                leftArm.rotation.y = 0.3;
+
+                // Right Arm
+                rightArm.rotation.x = 1.35; // Down
+                rightArm.rotation.z = -0.01; // Tuck
+                rightArm.rotation.y = -0.3;
+            }
+            if (leftForeArm && rightForeArm) {
+                leftForeArm.rotation.x = 0.15; // Natural bend
+                rightForeArm.rotation.x = 0.15;
+            }
+
+            // 2. Walking Logic (Movement Only)
+            if (currentAvatar) {
+                if (isEntering) {
+                    // --- WALKING MOVEMENT ---
+                    const walkSpeed = 0.01; // Slower movement
+                    currentAvatar.position.x -= walkSpeed;
+
+                    // Stop Condition
+                    if (currentAvatar.position.x <= 0) {
+                        currentAvatar.position.x = 0;
+                        isEntering = false;
+                        currentAvatar.rotation.y = 0; // Face Camera
+
+                        // Transition to Idle
+                        if (walkAction && idleAction) {
+                            walkAction.fadeOut(0.5);
+                            idleAction.reset().fadeIn(0.5).play();
+                            currentAction = idleAction;
+                        }
+                    }
+
+                } else {
+                    // --- IDLE STATE ---
+                    // Animation handles the pose now.
+                }
+            }
+
+            // 2. Head Turning Logic (Subtle + Speaking)
+            if (neckBone) {
+                const now = Date.now() * 0.001; // Use seconds for easier math
+                let rotY = Math.sin(now * 0.5) * 0.1 + Math.sin(now * 2.3) * 0.02;
+
+                // X (Pitch - Look Up/Down): Breathing rhythm
+                let rotX = Math.sin(now * 1.0) * 0.03;
+
+                // Speaking Overrides (Nodding/Gesturing)
+                if (isSpeaking) {
+                    // Faster, more pronounced nodding
+                    rotX += Math.sin(now * 15) * 0.01;
+                    // Slight side-to-side emphasis
+                    rotY += Math.sin(now * 5) * 0.01;
+                }
+
+                // Apply with smoothing (optional, but sine is smooth enough)
+                neckBone.rotation.y = rotY;
+                neckBone.rotation.x = rotX + 0.55; // Fix upward gaze (tilt down to camera level)
+            }
+
+            // 2.5 Eye Movements (Saccades)
+            if (leftEyeBone && rightEyeBone) {
+                const now = Date.now();
+                if (now > nextEyeMoveTime) {
+                    // Pick new target
+                    // Range: -0.1 to 0.1 radians (approx +/- 5 degrees)
+                    eyeTarget.x = (Math.random() - 0.5) * 0.2;
+                    eyeTarget.y = (Math.random() - 0.5) * 0.3;
+
+                    // Next move in 0.5 to 3 seconds
+                    nextEyeMoveTime = now + 500 + Math.random() * 2500;
+                }
+
+                // Smoothly move eyes
+                const lerpFactor = 0.1;
+                leftEyeBone.rotation.x = THREE.MathUtils.lerp(leftEyeBone.rotation.x, eyeTarget.x, lerpFactor);
+                leftEyeBone.rotation.y = THREE.MathUtils.lerp(leftEyeBone.rotation.y, eyeTarget.y, lerpFactor);
+
+                rightEyeBone.rotation.x = THREE.MathUtils.lerp(rightEyeBone.rotation.x, eyeTarget.x, lerpFactor);
+                rightEyeBone.rotation.y = THREE.MathUtils.lerp(rightEyeBone.rotation.y, eyeTarget.y, lerpFactor);
+            }
+
+
+
+            // 3. Lip Sync Processing (Rhubarb)
+            if (isSpeaking && currentLipSync && audioPlayer && !audioPlayer.paused) {
+                const currentTime = audioPlayer.currentTime;
+
+                // Find current cue
+                const currentCue = currentLipSync.mouthCues.find(cue =>
+                    currentTime >= cue.start && currentTime <= cue.end
+                );
+
+                let raw = 'X';
+                if (currentCue) raw = currentCue.value;
+
+                // Fix #1: Map Rhubarb shapes to True O / U
+                const RHUBARB_MAP = {
+                    'E': 'O',   // Rounded vowel
+                    'F': 'U',   // Tight vowel
+                };
+                let targetMouth = RHUBARB_MAP[raw] || raw;
+
+                // Fix #5: Context Awareness (Coarticulation)
+                const cueIdx = currentLipSync.mouthCues.indexOf(currentCue);
+                const prev = currentLipSync.mouthCues[cueIdx - 1]?.value || 'X';
+                const next = currentLipSync.mouthCues[cueIdx + 1]?.value || 'X';
+
+                // Rhubarb Vowels: C(E), D(A), E(O), F(U)
+                const isVowel = (v) => ['C', 'D', 'E', 'F'].includes(v);
+
+                // Apply to Mesh with COMPOSITE Logic
+                if (headMesh && Object.keys(morphMap).length > 0) {
+
+                    // 1. Calculate Target Influences for ALL morphs
+                    const targetInfluences = {};
+                    const recipe = morphMap[targetMouth] || [];
+
+                    recipe.forEach(item => {
+                        let w = item.weight;
+                        // Rule: If O is surrounded by vowels, relax the funnel
+                        if (targetMouth === 'O' && item.name === 'mouthFunnel') {
+                            if (isVowel(prev) && isVowel(next)) {
+                                w *= 0.5; // Reduce funnel by 50%
+                            }
+                        }
+                        targetInfluences[item.index] = w;
+                    });
+
+                    // 2. Apply smoothing to EVERY morph target on the mesh
+                    // Efficiently iterate only known morphs from our map to save perf
+                    // Get all unique indices involved in our system
+                    const allIndices = new Set();
+                    Object.values(morphMap).forEach(list => list.forEach(i => allIndices.add(i.index)));
+
+                    allIndices.forEach(idx => {
+                        const target = targetInfluences[idx] || 0.0;
+
+                        const current = headMesh.morphTargetInfluences[idx];
+                        // Fix #4: Faster Closing for realism
+                        const speed = target > current ? 0.5 : 0.45;
+
+                        headMesh.morphTargetInfluences[idx] = THREE.MathUtils.lerp(
+                            current,
+                            target,
+                            speed
+                        );
+                    });
+
+                    // Update Debug Overlay
+                    const debugPhoneme = document.getElementById('debug-phoneme');
+                    if (debugPhoneme) debugPhoneme.innerText = targetMouth;
+                }
+
+                // Fix #3: Precise Jaw Logic (Energy + Baseline)
+                // 1. Calculate Audio Energy
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0;
+                const bands = Math.floor(dataArray.length * 0.35); // Focus on speech range
+                for (let i = 0; i < bands; i++) sum += dataArray[i];
+                const energy = sum / bands;
+
+                // 2. Map Energy to Jaw Movement
+                const energyJaw = THREE.MathUtils.clamp(
+                    THREE.MathUtils.mapLinear(energy, 8, 55, 0, 0.035),
+                    0,
+                    0.035
+                );
+
+                if (jawBone) {
+                    const BASE_JAW_OPEN = 0.025; // Continuous teeth visibility
+                    let jawTarget = BASE_JAW_OPEN;
+
+                    switch (targetMouth) {
+                        case 'D': jawTarget += 0.055; break; // AH
+                        case 'C': jawTarget += 0.04; break; // EH
+                        case 'O': jawTarget += 0.03; break; // O
+                        case 'U': jawTarget += 0.015; break; // U
+                        case 'B': jawTarget += 0.02; break; // KST
+                        case 'G': jawTarget += 0.02; break; // FV
+                        case 'H': jawTarget += 0.03; break; // L / tongue
+                    }
+
+                    // Add Audio Energy
+                    jawTarget += energyJaw;
+
+                    jawBone.rotation.x = THREE.MathUtils.lerp(
+                        jawBone.rotation.x,
+                        jawTarget,
+                        0.25
+                    );
+                }
+
+            } else {
+                // Reset to closed when not speaking
+                // Reset Function (Smoothly close everything)
+                if (headMesh) {
+                    const allIndices = new Set();
+                    if (morphMap) Object.values(morphMap).forEach(list => list.forEach(i => allIndices.add(i.index)));
+
+                    allIndices.forEach(idx => {
+                        headMesh.morphTargetInfluences[idx] = THREE.MathUtils.lerp(
+                            headMesh.morphTargetInfluences[idx],
+                            0,
+                            0.15
+                        );
+                    });
+                }
+                if (jawBone) {
+                    jawBone.rotation.x = THREE.MathUtils.lerp(jawBone.rotation.x, 0, 0.2);
+                }
+
+                // Clear Debug
+                const debugPhoneme = document.getElementById('debug-phoneme');
+                if (debugPhoneme) debugPhoneme.innerText = '-';
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>
